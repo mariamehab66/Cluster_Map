@@ -1,0 +1,441 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Cluster Map</title>
+    <script src="https://cdn.jsdelivr.net/npm/leaflet@1.9.3/dist/leaflet.js"></script>
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/leaflet@1.9.3/dist/leaflet.css"/>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            margin: 0;
+            padding: 0;
+            display: flex;
+            flex-direction: column;
+            height: 100vh;
+        }
+        #header {
+            background-color: #f4f4f4;
+            padding: 10px;
+            text-align: center;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+        #buttons {
+            margin-right: 20px;
+        }
+        button {
+            padding: 5px 10px;
+            margin-left: 10px;
+            cursor: pointer;
+        }
+        #controls {
+            display: flex;
+            justify-content: center;
+            gap: 20px;
+            padding: 10px;
+            background-color: #e0e0e0;
+        }
+        #map-container {
+            flex: 1;
+            display: flex;
+            position: relative;
+        }
+        #map {
+            flex: 1;
+            height: 100%;
+        }
+        #info-panel {
+            width: 350px;
+            background: white;
+            padding: 10px;
+            border-left: 2px solid grey;
+            overflow-y: auto;
+            max-height: 100%;
+        }
+        #info-panel h3 {
+            margin-top: 0;
+        }
+        #info-panel ul {
+            padding-left: 20px;
+        }
+        .legend i {
+            display: inline-block;
+            width: 18px;
+            height: 18px;
+            margin-right: 8px;
+        }
+        /* Overlay styles */
+        .overlay {
+            display: none;
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: rgba(0, 0, 0, 0.5);
+            z-index: 1000;
+            justify-content: center;
+            align-items: center;
+        }
+        .overlay-content {
+            background: white;
+            padding: 20px;
+            border-radius: 5px;
+            max-width: 90%;
+            max-height: 90%;
+            overflow-y: auto;
+            position: relative;
+        }
+        .close-btn {
+            position: absolute;
+            top: 10px;
+            right: 10px;
+            cursor: pointer;
+            font-size: 20px;
+            border: none;
+            background: none;
+        }
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            margin-top: 10px;
+        }
+        th, td {
+            border: 1px solid #ddd;
+            padding: 8px;
+            text-align: left;
+        }
+        th {
+            background-color: #f2f2f2;
+        }
+    </style>
+    <script>
+        let data;
+        let plantData;
+
+        // Load data.json dynamically
+        fetch('data.json')
+            .then(response => {
+                if (!response.ok) throw new Error('Network response was not ok');
+                return response.json();
+            })
+            .then(json => {
+                data = json;
+                initializeMap();
+            })
+            .catch(error => {
+                console.error('Error loading data.json:', error);
+                initializeMap();
+            });
+
+        // Load plant compatibility data
+        fetch('cluster_plant_attributes_compatibility.csv')
+            .then(response => {
+                if (!response.ok) throw new Error('Network response was not ok');
+                return response.text();
+            })
+            .then(csv => {
+                plantData = parseCSV(csv);
+            })
+            .catch(error => {
+                console.error('Error loading plant compatibility data:', error);
+            });
+
+        function parseCSV(csv) {
+            const lines = csv.split('\n');
+            const result = [];
+            const headers = lines[0].split(',').map(header => header.trim());
+            for (let i = 1; i < lines.length; i++) {
+                if (lines[i]) {
+                    const obj = {};
+                    const currentLine = lines[i].split(',').map(item => item.trim());
+                    for (let j = 0; j < headers.length; j++) {
+                        obj[headers[j]] = currentLine[j] || '';
+                    }
+                    result.push(obj);
+                }
+            }
+            return result;
+        }
+
+        function initializeMap() {
+            const avgData = data ? data.avgData : [];
+            const seasonalDf = data ? data.seasonalDf : [];
+            const clusterMinMax = data ? data.clusterMinMax : {};
+            const plantMapping = data ? data.plantMapping : {};
+
+            const clusterColors = {0: 'SaddleBrown', 1: 'DarkGoldenrod', 2: 'DarkOliveGreen', 3: 'OrangeRed'};
+
+            const map = L.map('map').setView([27.0, 30.0], 6);
+            if (!map) {
+                console.error('Map failed to initialize');
+                return;
+            }
+
+            L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+                attribution: '© <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
+            }).addTo(map);
+
+            const legend = L.control({position: 'bottomleft'});
+            legend.onAdd = function(map) {
+                const div = L.DomUtil.create('div', 'info legend');
+                div.innerHTML = `
+                    <b>Cluster Legend</b><br>
+                    <i style="background: SaddleBrown;"></i> Cluster 0<br>
+                    <i style="background: DarkGoldenrod;"></i> Cluster 1<br>
+                    <i style="background: DarkOliveGreen;"></i> Cluster 2<br>
+                    <i style="background: OrangeRed;"></i> Cluster 3<br>
+                `;
+                div.style.backgroundColor = 'white';
+                div.style.padding = '10px';
+                div.style.border = '2px solid grey';
+                return div;
+            };
+            legend.addTo(map);
+
+            function updateMap() {
+                map.eachLayer(layer => {
+                    if (layer instanceof L.CircleMarker) {
+                        map.removeLayer(layer);
+                    }
+                });
+
+                const selectedCluster = document.getElementById('cluster-select').value;
+                const selectedSeason = document.getElementById('season-select').value;
+
+                let dataToPlot = seasonalDf;
+                if (dataToPlot.length === 0) {
+                    console.warn('No data to plot');
+                    return;
+                }
+                if (selectedCluster !== 'All') {
+                    dataToPlot = dataToPlot.filter(row => row.Cluster == selectedCluster);
+                }
+                if (selectedSeason !== 'All') {
+                    dataToPlot = dataToPlot.filter(row => row.Season === selectedSeason);
+                }
+
+                dataToPlot.forEach(row => {
+                    const color = clusterColors[row.Cluster] || 'gray';
+                    const popupText = `
+                        <b>Location:</b> Lat: ${row.LAT?.toFixed(1) || 'N/A'}, Lon: ${row.LON?.toFixed(1) || 'N/A'}<br>
+                        <b>Cluster:</b> ${row.Cluster || 'N/A'}<br>
+                        <b>Government:</b> ${row.GOV || 'N/A'}<br>
+                        <b>City:</b> ${row.City || 'N/A'}<br>
+                        <b>Season:</b> ${row.Season || 'N/A'}<br>
+                        <b>Elevation:</b> ${row.elevation || 'N/A'} m<br>
+                        <b>Distance to Nile:</b> ${row.Distance_to_Nile_km || 'N/A'} km<br>
+                        <b>Distance to Coast:</b> ${row.Distance_to_Nearest_Coast_km || 'N/A'} km<br>
+                        ${seasonSpecificContent(selectedSeason, row)}
+                    `;
+                    L.circleMarker([row.LAT || 27.0, row.LON || 30.0], {
+                        radius: 5,
+                        color: color,
+                        fill: true,
+                        fillOpacity: 0.7
+                    })
+                    .bindTooltip(`Lat: ${row.LAT?.toFixed(1) || 'N/A'}, Lon: ${row.LON?.toFixed(1) || 'N/A'}, Cluster: ${row.Cluster || 'N/A'}`)
+                    .bindPopup(popupText, {maxWidth: 300})
+                    .addTo(map);
+                });
+
+                const infoContent = document.getElementById('info-content');
+                if (selectedCluster !== 'All' && selectedSeason !== 'All') {
+                    const key = `${selectedCluster}_${selectedSeason}`;
+                    const minMax = clusterMinMax[key] || {};
+                    const plants = plantMapping[key] || [];
+
+                    let html = `<h4>Cluster ${selectedCluster} - ${selectedSeason}</h4>`;
+                    html += '<b>Percentiles:</b><ul>';
+                    for (let attr in minMax) {
+                        if (attr.includes('_percentile_')) {
+                            html += `<li>${attr.replace('_percentile_', ' (')}: ${minMax[attr]?.toFixed(2) || 'N/A'})</li>`;
+                        }
+                    }
+                    html += '</ul>';
+                    html += `<b>Suitable Plants:</b> ${plants.length ? plants.join(', ') : 'No plants available for this cluster and season.'}<br>`;
+                    infoContent.innerHTML = html;
+                } else {
+                    infoContent.innerHTML = 'Select a Cluster and Season to see details.';
+                }
+            }
+
+            function seasonSpecificContent(selectedSeason, row) {
+                if (selectedSeason === 'All') return '';
+                const seasonLower = selectedSeason.toLowerCase();
+                const attributesList = ['ALLSKY_SFC_SW_DWN', 'PSH', 'GWETROOT', 'GWETTOP', 'PRECTOTCORR', 'RH2M', 'T2M', 'TSOIL1', 'TSOIL4', 'WS2M'];
+                let content = '<b>Season Attributes:</b><br>';
+                attributesList.forEach(attr => {
+                    const value = row[attr] || 'N/A';
+                    content += `Average ${attr}: ${value === 'N/A' ? 'N/A' : value.toFixed(2)}<br>`;
+                });
+                return content;
+            }
+
+            document.getElementById('cluster-select').addEventListener('change', updateMap);
+            document.getElementById('season-select').addEventListener('change', updateMap);
+            updateMap();
+
+            document.getElementById('showPlantsBtn').addEventListener('click', () => {
+                const overlay = document.getElementById('plantsOverlay');
+                const overlayContent = document.getElementById('plantsOverlayContent');
+                if (overlay.style.display === 'none' || !overlay.style.display) {
+                    let tableHtml = '<table><tr>';
+                    if (plantData && plantData.length > 0) {
+                        for (let header in plantData[0]) {
+                            tableHtml += `<th>${header}</th>`;
+                        }
+                        tableHtml += '</tr>';
+                        plantData.forEach(row => {
+                            tableHtml += '<tr>';
+                            for (let key in row) {
+                                tableHtml += `<td>${row[key]}</td>`;
+                            }
+                            tableHtml += '</tr>';
+                        });
+                    } else {
+                        tableHtml += '<tr><td>No plant data available</td></tr>';
+                    }
+                    tableHtml += '</table>';
+            
+                    // إضافة التفسير تحت الجدول
+                    const explanationHtml = `
+                        <div style="margin-top: 20px; font-size: 14px; text-align: left;">
+                            <h4>Interpretations</h4>
+                            <ul>
+                                <li><b>> Excess:</b> The attribute is higher than the plant's needs, potentially harmful, requiring intervention.</li>
+                                <li><b>< Deficit:</b> The attribute is lower than the plant's needs, insufficient for optimal growth.</li>
+                                <li><b>= Suitable:</b> The attribute matches the plant's needs, ideal conditions.</li>
+                            </ul>
+                        </div>
+                    `;
+            
+                    overlayContent.innerHTML = tableHtml + explanationHtml +
+                        '<button class="close-btn" onclick="this.parentElement.parentElement.style.display=\'none\'">X</button>';
+                    overlay.style.display = 'flex';
+                } else {
+                    overlay.style.display = 'none';
+                }
+            });
+            
+            document.getElementById('showSolutionsBtn').addEventListener('click', () => {
+                const overlay = document.getElementById('solutionsOverlay');
+                const overlayContent = document.getElementById('solutionsOverlayContent');
+                if (overlay.style.display === 'none' || !overlay.style.display) {
+                    overlayContent.innerHTML = `
+                        <h3>Solutions for Plant Challenges in Agricultural Areas in Egypt</h3>
+                        <p>Based on Environmental Attributes</p>
+                        <div style="max-height: 80vh; overflow-y: auto; text-align: left;">
+                            <h4>🌬️ WS2M (Wind Speed at 2 Meters)</h4>
+                            <ul>
+                                <li><b>> Excess:</b> Plant windbreaks or use protective nets.<br><i>Reduces wind impact, preventing damage and water loss.</i></li>
+                                <li><b>< Deficit:</b> Improve ventilation using fans if necessary.<br><i>Prevents humidity buildup and disease spread.</i></li>
+                                <li><b>= Suitable:</b> No action needed.</li>
+                            </ul>
+            
+                            <h4>💧 RH2M (Relative Humidity at 2 Meters)</h4>
+                            <ul>
+                                <li><b>> Excess:</b> Improve ventilation or use fungicides.<br><i>Reduces fungal diseases caused by moisture.</i></li>
+                                <li><b>< Deficit:</b> Increase irrigation or use misting systems.<br><i>Prevents plant dehydration.</i></li>
+                                <li><b>= Suitable:</b> No action needed.</li>
+                            </ul>
+            
+                            <h4>🌡️ T2M (Temperature at 2 Meters)</h4>
+                            <ul>
+                                <li><b>> Excess:</b> Use shade nets or plant heat-tolerant varieties.<br><i>Reduces heat stress and wilting.</i></li>
+                                <li><b>< Deficit:</b> Use plastic covers or greenhouses.<br><i>Retains heat and protects from frost.</i></li>
+                                <li><b>= Suitable:</b> No action needed.</li>
+                            </ul>
+            
+                            <h4>🌱 TSOIL1 (Soil Temperature at 0–10 cm)</h4>
+                            <ul>
+                                <li><b>> Excess:</b> Mulch the soil to cool it.<br><i>Reduces soil heat and protects roots.</i></li>
+                                <li><b>< Deficit:</b> Use black plastic mulch to warm the soil.<br><i>Increases soil temperature for better growth.</i></li>
+                                <li><b>= Suitable:</b> No action needed.</li>
+                            </ul>
+            
+                            <h4>🌾 TSOIL4 (Soil Temperature at 100–200 cm)</h4>
+                            <ul>
+                                <li><b>> Excess:</b> Deep irrigation to cool the soil.<br><i>Helps maintain optimal temperature for roots.</i></li>
+                                <li><b>< Deficit:</b> Plant cold-tolerant varieties.<br><i>Adapts to cooler deep soil conditions.</i></li>
+                                <li><b>= Suitable:</b> No action needed.</li>
+                            </ul>
+            
+                            <h4>☔ PRECTOTCORR (Total Precipitation)</h4>
+                            <ul>
+                                <li><b>> Excess:</b> Improve drainage systems.<br><i>Prevents root rot and waterlogging.</i></li>
+                                <li><b>< Deficit:</b> Use drip irrigation or regular watering.<br><i>Ensures adequate water supply.</i></li>
+                                <li><b>= Suitable:</b> No action needed.</li>
+                            </ul>
+            
+                            <h4>🌊 GWETROOT (Root Zone Soil Moisture)</h4>
+                            <ul>
+                                <li><b>> Excess:</b> Improve drainage or plant moisture-tolerant varieties.<br><i>Prevents root diseases.</i></li>
+                                <li><b>< Deficit:</b> Increase irrigation or use water-retentive mulches.<br><i>Maintains soil moisture for growth.</i></li>
+                                <li><b>= Suitable:</b> No action needed.</li>
+                            </ul>
+            
+                            <h4>🧪 GWETTOP (Surface Soil Moisture)</h4>
+                            <ul>
+                                <li><b>> Excess:</b> Improve surface drainage or use raised beds.<br><i>Prevents seedling rot.</i></li>
+                                <li><b>< Deficit:</b> Use light irrigation or mulching.<br><i>Keeps surface moist for seedlings.</i></li>
+                                <li><b>= Suitable:</b> No action needed.</li>
+                            </ul>
+            
+                            <h4>☀️ ALLSKY_SFC_SW_DWN (Surface Solar Radiation)</h4>
+                            <ul>
+                                <li><b>> Excess:</b> Use shade nets or plant radiation-tolerant varieties.<br><i>Prevents leaf burn.</i></li>
+                                <li><b>< Deficit:</b> Plant in open areas or use reflective mulches.<br><i>Maximizes light exposure.</i></li>
+                                <li><b>= Suitable:</b> No action needed.</li>
+                            </ul>
+                        </div>
+                        <button class="close-btn" onclick="this.parentElement.parentElement.style.display='none'">X</button>
+                    `;
+                    overlay.style.display = 'flex';
+                } else {
+                    overlay.style.display = 'none';
+                }
+            });
+        };            
+    </script>
+    <div id="header">
+        <h2>Cluster Map - Egypt</h2>
+        <div id="buttons">
+            <button id="showPlantsBtn">Plants Table</button>
+            <button id="showSolutionsBtn">Solutions & Explanation</button>
+        </div>
+    </div>
+    <div id="controls">
+        <label for="cluster-select">Cluster: </label>
+        <select id="cluster-select">
+            <option value="All">All</option>
+            <option value="0">0</option>
+            <option value="1">1</option>
+            <option value="2">2</option>
+            <option value="3">3</option>
+        </select>
+        <label for="season-select">Season: </label>
+        <select id="season-select">
+            <option value="All">All</option>
+            <option value="Autumn">Autumn</option>
+            <option value="Spring">Spring</option>
+            <option value="Summer">Summer</option>
+            <option value="Winter">Winter</option>
+        </select>
+    </div>
+    <div id="map-container">
+        <div id="map"></div>
+        <div id="info-panel">
+            <h3>Cluster and Season Info</h3>
+            <div id="info-content">Loading...</div>
+        </div>
+    </div>
+    <div id="plantsOverlay" class="overlay">
+        <div id="plantsOverlayContent" class="overlay-content"></div>
+    </div>
+    <div id="solutionsOverlay" class="overlay">
+        <div id="solutionsOverlayContent" class="overlay-content"></div>
+    </div>
+</body>
+</html>
